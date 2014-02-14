@@ -40,6 +40,13 @@ class SphereGeometry(Geometry):
     _view_name = Unicode('SphereGeometryView', sync=True)
     radius = CFloat(1, sync=True)
 
+class CircleGeometry(Geometry):
+    _view_name = Unicode('CircleGeometryView', sync=True)
+    radius = CFloat(50, sync=True)
+    segments = CFloat(8, sync=True)
+    thetaStart = CFloat(0, sync=True)
+    thetaLength = CFloat(2*math.pi, sync=True)
+    
 class SurfaceGeometry(Geometry):
     """
     A regular grid with heights
