@@ -22,43 +22,72 @@ requirejs.config({
 });
 define("threejs-all", ["threejs-trackball", "threejs-orbit", "threejs-detector"], function() {console.log('three.js loaded')});
 
-require(["threejs-all", "notebook/js/widgets/widget"], function() {
+// also really need to require the widgets, but we'll assume they are loaded for now.
+require(["threejs-all"], function() {
     var RendererView = IPython.DOMWidgetView.extend({
         render : function(){
             console.log('created renderer');
             var width = this.model.get('width');
             var height = this.model.get('height');
+            var that = this;
+            var render_loop = {register_update: function(fn, context) {that.on('animate:update', fn, context);},
+                               render_frame: function () {that._render = true; that.schedule_update()},}
             if ( Detector.webgl )
-                this.renderer = new THREE.WebGLRenderer( {antialias:true} );
+                this.renderer = new THREE.WebGLRenderer( {antialias:true, alpha: true} );
             else
                 this.renderer = new THREE.CanvasRenderer();
-            this.renderer.setSize( width, height);
             this.$el.empty().append( this.renderer.domElement );
-            this.camera = this.create_child_view(this.model.get('camera'));
-            this.scene = this.create_child_view(this.model.get('scene'));
+            this.camera = this.create_child_view(this.model.get('camera'),
+                                                render_loop);
+            this.scene = this.create_child_view(this.model.get('scene'),
+                                               render_loop);
             this.scene.obj.add(this.camera.obj);
             console.log('renderer', this.model, this.scene.obj, this.camera.obj);
             this.update();
-            var that = this;
-            this.controls = this.create_child_view(this.model.get('controls'), {dom: this.renderer.domElement,
-                                                                         update: function(fn, context) {
-                                                                                    that.on('render:update', fn, context);
-                                                                                 }
-                                                                        });
-            this.animate();
+            this._animation_frame = false
+            this.controls = this.create_child_view(this.model.get('controls'),
+                     _.extend({},
+                              {dom: this.renderer.domElement,
+                               start_update_loop: function() {that._update_loop = true; that.schedule_update();},
+                               end_update_loop: function() {that._update_loop = false;},},
+                              render_loop));
+            this._render = true;
+            this.schedule_update();
             window.r = this;
         },
+        schedule_update: function() {
+            if (!this._animation_frame) {
+                this._animation_frame = requestAnimationFrame(_.bind(this.animate, this))
+            }
+        },
         animate: function() {
-            requestAnimationFrame( _.bind(this.animate, this) );
-            this.trigger('render:update');
-            this.renderer.render(this.scene.obj, this.camera.obj);
+            this._animation_frame = false;
+            if (this._update_loop) {
+                this.schedule_update();
+            }
+            this.trigger('animate:update', this);
+            if (this._render) {
+                this.effectrenderer.render(this.scene.obj, this.camera.obj)
+                this._render = false;
+            }
         },
         update : function(){
             console.log('update renderer', this.scene.obj, this.camera.obj);
+            if (this.model.get('effect')) {
+                this.effect = this.create_child_view(this.model.get('effect'), {renderer: this.renderer});
+                this.effectrenderer = this.effect.obj;
+            } else {
+                this.effectrenderer = this.renderer;
+            }
+            console.log(this.effect, this.model);
+            this.effectrenderer.setSize(this.model.get('width'),
+                                        this.model.get('height'));
+            if (this.model.get('color')) {
+                this.effectrenderer.setClearColor(this.model.get('color'))
+            }
             return IPython.DOMWidgetView.prototype.update.call(this);
         },
     });
-
     IPython.WidgetManager.register_widget_view('RendererView', RendererView);
 
     var ThreeView = IPython.WidgetView.extend({
@@ -69,6 +98,7 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
 
         render: function() {
             this.obj = this.new_obj();
+            this.register_object_parameters();
             this.update();
             return this.obj;
         },
@@ -83,7 +113,7 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
         },
         update: function() {
             //this.replace_obj(this.new_obj());
-            this.update_object_parameters();
+            //this.update_object_parameters();
             this.needs_update();
         },
 
@@ -96,6 +126,54 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
         },
 
         needs_update: function() {
+            this.obj.needsUpdate = true;
+            this.trigger('rerender');
+        },
+        register_object_parameters: function() {
+            var array_properties = this.array_properties;
+            var updates = {}
+            // first, we create update functions for each attribute
+            _.each(this.array_properties, function(p) {
+                updates[p] = function(t, value) {
+                    if (value.length !== 0) {
+                        // the default is the empty list, 
+                        // and we don't act in that case
+                        t.obj[p].fromArray(value);
+                    }
+                }});
+
+            _.each(this.scalar_properties, function(p) {
+                updates[p] = function(t, value) {
+                    t.obj[p] = value;
+                }});
+
+            _.each(this.enum_properties, function(p) {
+                updates[p] = function(t, value) {
+                    t.obj[p] = THREE[value];
+                }});
+
+            _.each(this.set_properties, function(p) {
+                updates[p] = function(t, value) {
+                    t.obj[p].set(value);
+                }});
+
+            _.each(this.child_properties, function(p) {
+                updates[p] = function(t, value) {
+                    if (value) {
+                        if (t[p]) {
+                            t[p].off('replace_obj', null, t);
+                        }
+                        t[p] = t.create_child_view(value, t.options[p]);
+                        t[p].on('replace_obj', function() {t.obj[p] = t[p].obj; t.needs_update()}, t);
+                        t.obj[p] = t[p].obj;
+                    }
+                }});
+
+            // next, we call and then register the update functions to changes
+            _.each(updates, function(update, p) {
+                update(this, this.model.get(p));
+                this.model.on('change:'+p, function(model, value, options) {update(this, value)}, this);
+            }, this);
         },
         update_object_parameters: function() {
             var array_properties = this.array_properties;
@@ -127,14 +205,22 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
                 var p = child_properties[p_index];
                 var prop = this.model.get(p);
                 if (prop) {
-                    this[p] = this.create_child_view(prop);
+                    this[p] = this.create_child_view(prop, this.options[p]);
                     this.obj[p] = this[p].obj;
-                    this[p].on('replace_obj', function() {this.obj[p] = this[p].obj; this.needs_update()}, this);
+                    // tricky binding of p's value for this callback function
+                    // see http://stackoverflow.com/questions/1451009/javascript-infamous-loop-issue, for example
+                    this[p].on('replace_obj', (function(p) {return function() {this.obj[p] = this[p].obj; this.needs_update()}})(p), this);
                 }
             }
         }
     });
 
+    var AnaglyphEffectView = ThreeView.extend({
+        new_obj: function() {
+        return new THREE.AnaglyphEffect( this.options.renderer );
+        }
+    })
+    IPython.WidgetManager.register_widget_view('AnaglyphEffectView', AnaglyphEffectView);
 
     var Object3dView = ThreeView.extend({
         new_properties: function() {
@@ -155,9 +241,10 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
                             that.delete_child_view(deleted);
                          },
                          function(added) {
-                            var view = that.create_child_view(added);
+                            var view = that.create_child_view(added, _.pick(that.options,'register_update'));
                             that.obj.add(view.obj);
                             view.on('replace_obj', that.replace_child_obj, that);
+                            view.on('rerender', that.needs_update, that);
                          });
         },
 
@@ -171,17 +258,26 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
             ThreeView.prototype.update.call(this);
         },
 
-        needs_update: function() {
-            this.obj.needsUpdate = true;
-        },
-
         replace_child_obj: function(old_obj, new_obj) {
             this.obj.remove(old_obj);
             this.obj.add(new_obj);
-            // TODO: trigger re-render, when we have an event-driven rendering loop
+            this.needs_update()
         },
     });
     IPython.WidgetManager.register_widget_view('Object3dView', Object3dView);
+
+    var ScaledObjectView = Object3dView.extend({
+        render: function() {
+            this.options.register_update(this.update_scale, this);
+            Object3dView.prototype.render.call(this);
+        },
+        update_scale: function(renderer) {
+            var s = renderer.camera.obj.position.length()/10;
+            // one unit is about 1/10 the size of the window
+            this.obj.scale.set(s,s,s);
+        }
+    });
+    IPython.WidgetManager.register_widget_view('ScaledObjectView', ScaledObjectView);
 
     var CameraView = Object3dView.extend({
         new_obj: function() {
@@ -189,6 +285,7 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
         },
         needs_update: function() {
             this.obj.updateProjectionMatrix();
+            this.options.render_frame();
         }
     });
     IPython.WidgetManager.register_widget_view('CameraView', CameraView);
@@ -225,10 +322,14 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
 
     var OrbitControlsView = ThreeView.extend({
         render: function() {
-            // retrieve the first view of the controlled object
+            // retrieve the first view of the controlled object -- this is a hack for a singleton view
             this.controlled_view = this.model.get('controlling').views[0];
             this.obj = new THREE.OrbitControls(this.controlled_view.obj, this.options.dom);
-            this.options.update(this.obj.update, this.obj);
+            this.options.register_update(this.obj.update, this.obj);
+            this.obj.addEventListener('change', this.options.render_frame);
+            this.obj.addEventListener('start', this.options.start_update_loop);
+            this.obj.addEventListener('end', this.options.end_update_loop);
+            // if there is a three.js control change, call the animate function to animate at least one more time
             delete this.options.renderer;
         }
     });
@@ -236,9 +337,12 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
 
 
     var SceneView = Object3dView.extend({
-        new_obj: function() {return new THREE.Scene();}
+        new_obj: function() {return new THREE.Scene();},
+        needs_update: function() {console.log('scene needs update');this.options.render_frame();}
     });
     IPython.WidgetManager.register_widget_view('SceneView', SceneView);
+
+
 
     var SurfaceGeometryView = ThreeView.extend({
         update: function() {
@@ -266,7 +370,9 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
             var vertices = this.model.get('vertices');
             var face3 = this.model.get('face3');
             var face4 = this.model.get('face4');
-            var i, len;
+            var facen = this.model.get('facen');
+            var face;
+            var i, f, len, lenf;
             var v0, v1, v2;
             var f0,f1,f2,f3;
             for(i = 0, len=vertices.length; i<len; i+=3) {
@@ -282,7 +388,13 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
                 geometry.faces.push(new THREE.Face3(f0, f1, f2));
                 geometry.faces.push(new THREE.Face3(f0, f2, f3));
             }
-
+            for(i=0, len=facen.length; i<len; i++) {
+                face = facen[i];
+                f0 = face[0];
+                for(f=1, lenf=f.length-1; f<lenf; f++) {
+                    geometry.faces.push(new THREE.Face3(f0, face[f], face[f+1]));
+                }
+            }
             geometry.mergeVertices();
             geometry.computeFaceNormals();
             geometry.computeVertexNormals();
@@ -444,13 +556,10 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
         new_properties: function() {
             ThreeView.prototype.new_properties.call(this);
             this.enum_properties.push('side', 'blending', 'blendSrc', 'blendDst', 'blendEquation');
-            this.scalar_properties.push('opacity', 'transparent', 'depthTest', 'depthWrite', 'polygonOffset', 'polygonOffsetFactor',
-                                        'polygonOffsetUnits', 'overdraw', 'visible');
+            this.scalar_properties.push('opacity', 'transparent', 'depthTest', 'depthWrite', 'polygonOffset',
+                                        'polygonOffsetFactor', 'polygonOffsetUnits', 'overdraw', 'visible');
         },
         new_obj: function() {return new THREE.Material();},
-        needs_update: function() {
-            this.obj.needsUpdate = true;
-        }
     });
     IPython.WidgetManager.register_widget_view('MaterialView', MaterialView);
 
@@ -562,6 +671,8 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
             this.materialview = this.create_child_view(this.model.get('material'));
             this.geometryview.on('replace_obj', this.update, this);
             this.materialview.on('replace_obj', this.update, this);
+            this.geometryview.on('rerender', this.needs_update, this);
+            this.materialview.on('rerender', this.needs_update, this);
             this.update();
             return this.obj;
         },
@@ -573,8 +684,8 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
             Object3dView.prototype.update.call(this);
         }
     });
-        IPython.WidgetManager.register_widget_view('MeshView', MeshView);
-        
+    IPython.WidgetManager.register_widget_view('MeshView', MeshView);
+
     var ImageTextureView = ThreeView.extend({
         update: function() {
             var img = new Image();
@@ -584,11 +695,125 @@ require(["threejs-all", "notebook/js/widgets/widget"], function() {
             this.replace_obj(new THREE.Texture(img));
             ThreeView.prototype.update.call(this);
         },
-        needs_update: function() {
-            this.obj.needsUpdate = true;
-        }
     });
     IPython.WidgetManager.register_widget_view('ImageTextureView', ImageTextureView);
+
+    var DataTextureView = ThreeView.extend({
+        update: function() {
+            var dataType = this.model.get('type');
+            var dataArr;
+            var data = this.model.get('data');
+            switch (dataType)
+            {
+                case 'UnsignedByteType':
+                    dataArr = new Uint8Array(data.length);
+                    break;
+                case 'ByteType':
+                    dataArr = new Int8Array(data.length);
+                    break;
+                case 'ShortType':
+                    dataArr = new Int16Array(data.length);
+                    break;
+                case 'IntType':
+                    dataArr = new Int32Array(data.length);
+                    break;
+                case 'UnsignedIntType':
+                    dataArr = new Uint32Array(data.length);
+                    break;
+                case 'FloatType':
+                    dataArr = new Float32Array(data.length);
+                    break;
+                case 'UnsignedShortType':
+                case 'UnsignedShort4444Type':
+                case 'UnsignedShort5551Type':
+                case 'UnsignedShort565Type':
+                    dataArr = new Uint16Array(data.length);
+                    break;
+            }
+            dataArr.set(data);
+
+            this.replace_obj(new THREE.DataTexture(dataArr, this.model.get('width'), this.model.get('height'),
+                            THREE[this.model.get('format')], THREE[dataType], THREE[this.model.get('mapping')],
+                            THREE[this.model.get('wrapS')], THREE[this.model.get('wrapT')],
+                            THREE[this.model.get('magFilter')], THREE[this.model.get('minFilter')],
+                            this.model.get('anisotropy')));
+            ThreeView.prototype.update.call(this);
+        },
+    });
+    IPython.WidgetManager.register_widget_view('DataTextureView', DataTextureView);
+
+    var SpriteMaterialView = MaterialView.extend({
+        new_properties: function() {
+            MaterialView.prototype.new_properties.call(this);
+            this.scalar_properties.push('sizeAttenuation', 'fog', 'useScreenCoordinates', 'scaleByViewport');
+            this.array_properties.push('uvScale', 'uvOffset', 'alignment');
+            this.set_properties.push('color');
+            this.child_properties.push('map');
+        },
+        new_obj: function() {return new THREE.SpriteMaterial();}
+    });
+    IPython.WidgetManager.register_widget_view('SpriteMaterialView', SpriteMaterialView);
+
+    var SpriteView = Object3dView.extend({
+        render: function() {
+            this.materialview = this.create_child_view(this.model.get('material'));
+            this.materialview.on('replace_obj', this.update, this);
+            this.materialview.on('rerender', this.needs_update, this);
+            this.update();
+            return this.obj;
+        },
+        update: function() {
+            this.replace_obj(new THREE.Sprite(this.materialview.obj));
+            Object3dView.prototype.update.call(this);
+        },
+        needs_update: function() {
+            if (this.model.get('scaleToTexture')) {
+                if (this.materialview.map.aspect) {
+                    this.model.set('scale', [this.materialview.map.aspect,1,1]);
+                    this.touch();
+                }
+            }
+            Object3dView.prototype.needs_update.call(this);
+        }
+    });
+    IPython.WidgetManager.register_widget_view('SpriteView', SpriteView);
+
+    var TextTextureView = ThreeView.extend({
+        update: function() {
+            var fontFace = this.model.get('fontFace');
+            var size = this.model.get('size');
+            var color = this.model.get('color');
+            var string = this.model.get('string');
+
+            var canvas = document.createElement("canvas");
+            var context = canvas.getContext("2d");
+
+            canvas.height = size;
+            var font = "Normal " + size + "px " + fontFace;
+            context.font = font;
+
+            var metrics = context.measureText(string);
+            var textWidth = metrics.width;
+            canvas.width = textWidth;
+
+            if (this.model.get('squareTexture')) {
+                canvas.height = canvas.width;
+            }
+            
+            this.aspect = canvas.width / canvas.height;
+
+            context.textAlign = "center";
+            context.textBaseline = "middle";
+            context.fillStyle = color;
+            // Must set the font again for the fillText call
+            context.font = font;
+            context.fillText(string, canvas.width / 2, canvas.height / 2);
+            
+            this.replace_obj(new THREE.Texture(canvas));
+            ThreeView.prototype.update.call(this);
+        }
+    });
+    IPython.WidgetManager.register_widget_view('TextTextureView', TextTextureView);
 
     var Basic3dObject = Object3dView.extend({
         render: function() {
